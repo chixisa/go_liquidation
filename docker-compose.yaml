@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      - zookeeper
+    ports:
+      # 【修复1】将宿主机的 9092 映射到容器的 29092
+      # 这样外部(Windows)可以通过 localhost:9092 访问，而不会和容器内冲突
+      - "9092:29092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      # 【修复2】监听器配置
+      # PLAINTEXT (9092): 给容器间通信用 (Go服务 -> Kafka)
+      # PLAINTEXT_HOST (29092): 给外部访问用 (Windows -> Kafka)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+
+      # 【修复3】对外广播地址
+      # 告诉 Go 服务：找 "kafka:9092"
+      # 告诉 Windows：找 "localhost:9092"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9092
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: clearing_db
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: 123456
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d
+
+  clearing-service:
+    # 【重要】添加重启策略
+    # 解决 "dial tcp ... connection refused" 问题
+    # 如果数据库没准备好，程序会退出，Docker 会自动重试，直到连上为止
+    restart: on-failure
+    build:
+      context: .
+      # 你的 Dockerfile 已经硬编码了代理 IP，这里的 args 其实可以删掉
+      # 但留着也没事，双重保险
+      args:
+        HTTP_PROXY: http://host.docker.internal:10808
+        HTTPS_PROXY: http://host.docker.internal:10808
+    depends_on:
+      - postgres
+      - kafka
+    environment:
+      # 容器内部互联，必须用服务名 "postgres" 和 "kafka"
+      - DATABASE_URL=postgres://root:123456@postgres:5432/clearing_db?sslmode=disable
+      - KAFKA_BROKERS=kafka:9092
+
+volumes:
+  postgres_data:
